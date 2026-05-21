@@ -3,8 +3,8 @@ from aiogram import Bot, Dispatcher, types
 from aiogram.filters import CommandStart
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton, WebAppInfo
 
-BOT_TOKEN = "YOUR_BOT_TOKEN"
-WEBAPP_URL = "YOUR_MINI_APP_URL"
+BOT_TOKEN = "8688595318:AAFNzUAfwq2vpERCi6r7SHCYECWdi8dODMM"
+WEBAPP_URL = "https://pathfys.github.io/lzt/"
 
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
