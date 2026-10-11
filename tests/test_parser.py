@@ -2,14 +2,15 @@ from decimal import Decimal
 
 import pytest
 
-from offerbot.parser import Offer, ParseError, parse, split_command
+from offerbot.parser import Offer, ParseError, parse, parse_duration, split_command
 
 
 def test_documented_form():
-    offer = parse(".buy stars 1500 plushpepe 1234 en")
+    offer = parse(".buy stars 1500 plushpepe 1234 en 6h")
     assert offer == Offer(
         side="buy", currency="stars", amount=Decimal(1500),
         gift_slug="PlushPepe", gift_known=True, gift_number=1234, lang="en",
+        ttl_seconds=6 * 3600,
     )
 
 
@@ -82,3 +83,52 @@ def test_split_command_ignores_unrelated_text():
     assert split_command("hello there") is None
     assert split_command(".buyer beware") is None
     assert split_command(".buy stars 1 a 1") == ("buy", "stars 1 a 1")
+
+
+# ---- offer lifetime ----
+
+@pytest.mark.parametrize("token,seconds", [
+    ("3h", 3 * 3600),
+    ("6h", 6 * 3600),
+    ("12h", 12 * 3600),
+    ("30m", 30 * 60),
+    ("1d", 86400),
+    ("3ч", 3 * 3600),
+    ("90мин", 90 * 60),
+])
+def test_duration_tokens(token, seconds):
+    assert parse_duration(token) == seconds
+    assert parse(f".buy stars 100 lolpop 3 en {token}").ttl_seconds == seconds
+
+
+def test_duration_may_sit_anywhere():
+    for command in (
+        ".buy stars 100 lolpop 3 en 12h",
+        ".buy 12h stars 100 lolpop 3 en",
+        ".buy stars 12h 100 lolpop 3 en",
+    ):
+        assert parse(command).ttl_seconds == 12 * 3600
+
+
+def test_duration_falls_back_to_the_configured_default():
+    assert parse(".buy stars 100 lolpop 3 en").ttl_seconds == 6 * 3600
+    assert parse(".buy stars 100 lolpop 3 en", default_ttl=1800).ttl_seconds == 1800
+
+
+def test_a_duration_is_not_mistaken_for_a_price():
+    offer = parse(".buy stars 1500 plushpepe 1234 en 6h")
+    assert offer.amount == Decimal(1500)
+    assert offer.gift_number == 1234
+    assert offer.ttl_seconds == 6 * 3600
+
+
+@pytest.mark.parametrize("token", ["1m", "99d", "0h"])
+def test_out_of_range_lifetimes_are_rejected(token):
+    with pytest.raises(ParseError) as caught:
+        parse(f".buy stars 100 lolpop 3 en {token}")
+    assert caught.value.code == "bad_ttl"
+
+
+def test_non_duration_tokens_are_not_swallowed():
+    assert parse_duration("plushpepe") is None
+    assert parse_duration("1234") is None

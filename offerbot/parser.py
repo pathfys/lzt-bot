@@ -1,7 +1,7 @@
 """Command parsing.
 
 Documented form:
-    .buy <stars|gram> <amount> <gift> <number> <en|ru>
+    .buy <stars|gram> <amount> <gift> <number> <en|ru> [3h|6h|12h]
 
 Parsing is deliberately tolerant, because the command is typed by hand on a
 phone in the middle of a trade: currency and language may sit anywhere,
@@ -42,11 +42,29 @@ INTEGER_ONLY = {"stars"}
 
 MAX_GIFT_NUMBER = 10_000_000
 
+#: How long an offer may stay open. Anything shorter than a few minutes is a
+#: typo; anything longer than a week is not an offer any more.
+MIN_TTL = 5 * 60
+MAX_TTL = 7 * 24 * 3600
+
+_DURATION_UNITS = {
+    "m": 60, "min": 60, "mins": 60, "minute": 60, "minutes": 60,
+    "м": 60, "мин": 60,
+    "h": 3600, "hr": 3600, "hrs": 3600, "hour": 3600, "hours": 3600,
+    "ч": 3600, "час": 3600, "часа": 3600, "часов": 3600,
+    "d": 86400, "day": 86400, "days": 86400,
+    "д": 86400, "дн": 86400, "день": 86400,
+}
+
 _COMMAND_RE = re.compile(r"^[.!/](\w+)(?:\s+(.*))?$", re.IGNORECASE | re.DOTALL)
 _NUMBER_RE = re.compile(r"^\d+(?:[.,]\d+)?$")
 _HASH_NUMBER_RE = re.compile(r"^#(\d+)$")
 _GLUED_AMOUNT_RE = re.compile(r"^(\d+(?:[.,]\d+)?)\s*(stars?|ton|grams?|⭐️?|💎)$", re.IGNORECASE)
 _GIFT_WITH_NUMBER_RE = re.compile(r"^([A-Za-zА-Яа-яЁё][\w'’]*)[-#](\d+)$")
+_DURATION_RE = re.compile(
+    r"^(\d+)\s*(" + "|".join(sorted(_DURATION_UNITS, key=len, reverse=True)) + r")$",
+    re.IGNORECASE,
+)
 
 
 class ParseError(Exception):
@@ -67,10 +85,19 @@ class Offer:
     gift_known: bool
     gift_number: int
     lang: str
+    ttl_seconds: int
 
     @property
     def is_integer_currency(self) -> bool:
         return self.currency in INTEGER_ONLY
+
+
+def parse_duration(token: str) -> int | None:
+    """'6h' -> 21600. None when the token is not a duration at all."""
+    match = _DURATION_RE.match(token)
+    if not match:
+        return None
+    return int(match.group(1)) * _DURATION_UNITS[match.group(2).lower()]
 
 
 def _to_decimal(token: str) -> Decimal:
@@ -91,7 +118,13 @@ def split_command(text: str) -> tuple[str, str] | None:
     return side, (match.group(2) or "").strip()
 
 
-def parse(text: str, *, default_lang: str = "en", default_currency: str | None = None) -> Offer:
+def parse(
+    text: str,
+    *,
+    default_lang: str = "en",
+    default_currency: str | None = None,
+    default_ttl: int = 6 * 3600,
+) -> Offer:
     head = split_command(text)
     if head is None:
         raise ParseError("usage")
@@ -101,6 +134,7 @@ def parse(text: str, *, default_lang: str = "en", default_currency: str | None =
 
     currency: str | None = None
     lang: str | None = None
+    ttl: int | None = None
     explicit_number: int | None = None
     gift_from_token: str | None = None
     numbers: list[Decimal] = []
@@ -118,6 +152,16 @@ def parse(text: str, *, default_lang: str = "en", default_currency: str | None =
             # currency when it stands among other tokens, which it does here.
             currency = CURRENCIES[lowered]
             continue
+
+        if ttl is None:
+            duration = parse_duration(token)
+            if duration is not None:
+                # Checked before the bare-number branch so "6h" is a lifetime
+                # and not a price.
+                if not MIN_TTL <= duration <= MAX_TTL:
+                    raise ParseError("bad_ttl", value=token)
+                ttl = duration
+                continue
 
         glued = _GLUED_AMOUNT_RE.match(token)
         if glued:
@@ -150,6 +194,8 @@ def parse(text: str, *, default_lang: str = "en", default_currency: str | None =
         raise ParseError("no_currency")
     if lang is None:
         lang = default_lang
+    if ttl is None:
+        ttl = default_ttl
 
     # ---- split the numbers into price and gift number ----
     if explicit_number is not None:
@@ -192,4 +238,5 @@ def parse(text: str, *, default_lang: str = "en", default_currency: str | None =
         gift_known=known,
         gift_number=gift_number,
         lang=lang,
+        ttl_seconds=ttl,
     )

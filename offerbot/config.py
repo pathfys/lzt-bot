@@ -9,6 +9,8 @@ import os
 from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation
 
+from .parser import MAX_TTL, MIN_TTL, parse_duration
+
 
 class ConfigError(RuntimeError):
     pass
@@ -38,6 +40,11 @@ class Config:
     session: str
     session_is_string: bool
 
+    #: Without a bot token the card is posted by the account itself and has no
+    #: buttons: inline keyboards are a bot-only feature of the Telegram API.
+    bot_token: str | None = None
+    db_path: str = "offers.db"
+
     default_lang: str = "en"
     default_currency: str | None = None
     contact: str | None = None
@@ -49,6 +56,8 @@ class Config:
 
     error_ttl: float = 12.0
     rate_ttl: float = 300.0
+    default_ttl: int = 6 * 3600
+    sweep_interval: float = 30.0
     star_usd: Decimal = Decimal("0.015")
     flood_sleep_threshold: int = 60
 
@@ -77,6 +86,22 @@ class Config:
         if currency not in {None, "stars", "gram"}:
             raise ConfigError(f"DEFAULT_CURRENCY must be stars or gram, got {currency!r}")
 
+        ttl_raw = os.environ.get("DEFAULT_TTL", "6h").strip() or "6h"
+        default_ttl = parse_duration(ttl_raw)
+        if default_ttl is None:
+            try:
+                default_ttl = int(ttl_raw)
+            except ValueError:
+                raise ConfigError(
+                    f"DEFAULT_TTL must look like 3h, 90m or a number of seconds, "
+                    f"got {ttl_raw!r}"
+                )
+        if not MIN_TTL <= default_ttl <= MAX_TTL:
+            raise ConfigError(
+                f"DEFAULT_TTL must be between {MIN_TTL}s and {MAX_TTL}s, "
+                f"got {default_ttl}s"
+            )
+
         star_usd_raw = os.environ.get("STAR_USD_RATE", "0.015").strip()
         try:
             star_usd = Decimal(star_usd_raw)
@@ -88,6 +113,8 @@ class Config:
             api_hash=api_hash,
             session=session,
             session_is_string=bool(session_string),
+            bot_token=os.environ.get("BOT_TOKEN", "").strip() or None,
+            db_path=os.environ.get("DB_PATH", "offers.db").strip() or "offers.db",
             default_lang=lang,
             default_currency=currency,
             contact=os.environ.get("CONTACT", "").strip() or None,
@@ -97,6 +124,8 @@ class Config:
             resend_fallback=_bool("RESEND_FALLBACK", True),
             error_ttl=_float("ERROR_TTL", 12.0),
             rate_ttl=_float("RATE_TTL", 300.0),
+            default_ttl=default_ttl,
+            sweep_interval=_float("SWEEP_INTERVAL", 30.0),
             star_usd=star_usd,
             flood_sleep_threshold=int(_float("FLOOD_SLEEP_THRESHOLD", 60)),
         )
