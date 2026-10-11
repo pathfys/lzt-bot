@@ -1,0 +1,19 @@
+# secrets — NEVER commit a session, it is full account access
+.env
+*.session
+*.session-journal
+session.txt
+session_string*
+
+# python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.pytest_cache/
+*.egg-info/
+
+# runtime
+*.db
+*.sqlite3
+*.log
