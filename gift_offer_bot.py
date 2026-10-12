@@ -280,6 +280,9 @@ class OfferState:
     author_id: int
     author_label: str
     author_username: str | None = None
+    chat_id: int | None = None
+    card_message_id: int | None = None
+    business_connection_id: str | None = None
     status: str = "open"            # open | accepted | cancelled
     acceptor_label: str | None = None
 
@@ -350,31 +353,63 @@ def run() -> int:
     bot = Bot(token, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
     dp = Dispatcher()
 
-    @dp.message(F.text.regexp(COMMAND_RE.pattern))
-    async def on_command(message: Message) -> None:
+    async def post_offer(message: Message, bcid: str | None) -> None:
+        """Turn a .buy/.sell command into the offer card.
+
+        `bcid` is set when the command was typed in one of the owner's own DMs
+        through a Telegram Business connection; the card is then sent on behalf
+        of the owner into that same DM.
+        """
         try:
             offer = parse(message.text)
         except ParseError as exc:
-            await message.reply(TEXT["ru"][exc.code], link_preview_options=LinkPreviewOptions(is_disabled=True))
+            try:
+                await bot.send_message(
+                    message.chat.id, TEXT["ru"][exc.code],
+                    business_connection_id=bcid,
+                    link_preview_options=LinkPreviewOptions(is_disabled=True),
+                )
+            except Exception as err:
+                log.warning("could not send usage hint: %s", err)
             return
 
         author = message.from_user
-        offer_id = store.add(OfferState(
+        state = OfferState(
             offer=offer,
             author_id=author.id,
             author_label=_label(author),
             author_username=author.username,
-        ))
+            chat_id=message.chat.id,
+            business_connection_id=bcid,
+        )
+        offer_id = store.add(state)
 
-        await message.answer(
+        card = await bot.send_message(
+            message.chat.id,
             render_offer(offer, name=author.first_name or _label(author)),
+            business_connection_id=bcid,
             link_preview_options=preview(offer),
             reply_markup=offer_keyboard(offer_id, offer.lang),
         )
+        state.card_message_id = card.message_id
+
+        # Tidy the command away if we are allowed to.
         try:
-            await message.delete()  # tidy the command away if allowed (admin in a group)
+            if bcid:
+                await bot.delete_business_messages(bcid, [message.message_id])
+            else:
+                await bot.delete_message(message.chat.id, message.message_id)
         except Exception:
             pass
+
+    @dp.message(F.text.regexp(COMMAND_RE.pattern))
+    async def on_command(message: Message) -> None:
+        await post_offer(message, None)
+
+    @dp.business_message(F.text.regexp(COMMAND_RE.pattern))
+    async def on_business_command(message: Message) -> None:
+        # Fires for commands typed in the owner's DMs via a business connection.
+        await post_offer(message, message.business_connection_id)
 
     @dp.callback_query(OfferCB.filter())
     async def on_press(query: CallbackQuery, callback_data: OfferCB) -> None:
@@ -384,6 +419,17 @@ def run() -> int:
             return
         offer, t = state.offer, TEXT[state.offer.lang]
         presser = query.from_user
+        bcid = state.business_connection_id
+
+        async def rewrite(text: str, markup) -> None:
+            await bot.edit_message_text(
+                text,
+                chat_id=state.chat_id,
+                message_id=state.card_message_id,
+                business_connection_id=bcid,
+                link_preview_options=preview(offer),
+                reply_markup=markup,
+            )
 
         if state.status != "open":
             await query.answer(t["a_taken"], show_alert=True)
@@ -398,18 +444,17 @@ def run() -> int:
 
             # On a buy the author receives the gift; on a sell the acceptor does.
             if offer.side == "buy":
-                receiver_id = state.author_id
-                receiver_label = state.author_label
-                receiver_name = state.author_username
+                receiver_id, receiver_label, receiver_name = (
+                    state.author_id, state.author_label, state.author_username,
+                )
             else:
-                receiver_id = presser.id
-                receiver_label = state.acceptor_label
-                receiver_name = presser.username
+                receiver_id, receiver_label, receiver_name = (
+                    presser.id, state.acceptor_label, presser.username,
+                )
 
-            await query.message.edit_text(
+            await rewrite(
                 render_accepted(offer, acceptor=state.acceptor_label, receiver=receiver_label),
-                link_preview_options=preview(offer),
-                reply_markup=transfer_keyboard(offer.lang, receiver_id, receiver_name),
+                transfer_keyboard(offer.lang, receiver_id, receiver_name),
             )
             await query.answer(t["a_ok_accept"])
             return
@@ -419,16 +464,15 @@ def run() -> int:
             await query.answer(t["a_author_only"], show_alert=True)
             return
         state.status = "cancelled"
-        await query.message.edit_text(
-            render_closed(offer, by_author=True),
-            link_preview_options=preview(offer),
-            reply_markup=None,
-        )
+        await rewrite(render_closed(offer, by_author=True), None)
         await query.answer(t["a_ok_decline"])
 
     async def main() -> None:
         me = await bot.get_me()
-        log.info("bot @%s is live — type .buy <link> <stars|gram> <amount>", me.username)
+        log.info(
+            "bot @%s is live — groups/DM-with-bot and Telegram Business DMs. "
+            "Type .buy <link> <stars|gram> <amount>", me.username,
+        )
         await dp.start_polling(bot)
 
     asyncio.run(main())
