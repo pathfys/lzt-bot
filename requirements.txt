@@ -1,4 +1,1 @@
-# Verified against this code: InputMediaWebPage and
-# EditMessageRequest(invert_media=...) need a recent Telethon.
-# Developed and tested on 1.45.
-Telethon>=1.45,<2
+aiogram>=3.31,<4
