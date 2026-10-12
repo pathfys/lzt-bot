@@ -81,15 +81,13 @@ DUR_SUFFIX = {"ru": {"d": "д", "h": "ч", "m": "м"}, "en": {"d": "d", "h": "h"
 
 TEXT = {
     "ru": {
-        "accept": "✅ Принять", "decline": "✖️ Отклонить", "transfer": "🎁 Передать NFT",
-        "title": "🎁 Оффер на подарок",
-        "offer_line": "<b>{name}</b> предлагает вам <b>{amount} {unit}</b>",
-        "gift_line": "Подарок: {gift}",
-        "valid_line": "⏳ Действует: {dur}",
-        "accepted": "✅ ОФФЕР ПРИНЯТ",
-        "declined": "✖️ ОФФЕР ОТКЛОНЁН",
-        "cancelled": "✖️ ОФФЕР ОТМЕНЁН",
-        "expired": "⌛ ОФФЕР ИСТЁК",
+        "accept": "Принять", "decline": "Отклонить", "transfer": "Передать НФТ",
+        "offer_line": "<b>{name}</b> предлагает вам <b>{amount} {unit}</b> за подарок {gift}",
+        "valid_line": "Действует: {dur}",
+        "accepted": "ОФФЕР ПРИНЯТ",
+        "declined": "ОФФЕР ОТКЛОНЁН",
+        "cancelled": "ОФФЕР ОТМЕНЁН",
+        "expired": "ОФФЕР ИСТЁК",
         "accepted_by": "{who} принял оффер.",
         "hand_over": "Передайте подарок пользователю {who}.",
         "hand_over_how": "Откройте его профиль кнопкой ниже и отправьте NFT через меню подарка.",
@@ -113,15 +111,13 @@ TEXT = {
         "bad_ttl": "Срок <code>{value}</code> вне диапазона — от 5m до 7d.",
     },
     "en": {
-        "accept": "✅ Accept", "decline": "✖️ Decline", "transfer": "🎁 Transfer NFT",
-        "title": "🎁 Gift offer",
-        "offer_line": "<b>{name}</b> offers you <b>{amount} {unit}</b>",
-        "gift_line": "Gift: {gift}",
-        "valid_line": "⏳ Valid for: {dur}",
-        "accepted": "✅ OFFER ACCEPTED",
-        "declined": "✖️ OFFER DECLINED",
-        "cancelled": "✖️ OFFER CANCELLED",
-        "expired": "⌛ OFFER EXPIRED",
+        "accept": "Accept", "decline": "Decline", "transfer": "Transfer NFT",
+        "offer_line": "<b>{name}</b> offers you <b>{amount} {unit}</b> for the gift {gift}",
+        "valid_line": "Valid for: {dur}",
+        "accepted": "OFFER ACCEPTED",
+        "declined": "OFFER DECLINED",
+        "cancelled": "OFFER CANCELLED",
+        "expired": "OFFER EXPIRED",
         "accepted_by": "{who} accepted the offer.",
         "hand_over": "Hand the gift over to {who}.",
         "hand_over_how": "Open their profile with the button below and send the NFT from the gift menu.",
@@ -266,15 +262,9 @@ def _price(offer: Offer) -> str:
 
 def render_offer(offer: Offer, *, name: str, expires_at: float | None = None) -> str:
     t = TEXT[offer.lang]
-    dur = fmt_duration(offer.ttl_seconds, offer.lang)
-    if expires_at:
-        dur += f" · {fmt_deadline(expires_at)}"
     return "\n".join([
-        f"<b>{t['title']}</b>",
-        "",
-        t["offer_line"].format(name=escape(name), amount=offer.amount_str(), unit=offer.unit()),
-        t["gift_line"].format(gift=_gift_ref(offer)),
-        t["valid_line"].format(dur=dur),
+        t["offer_line"].format(name=escape(name), amount=offer.amount_str(), unit=offer.unit(), gift=_gift_ref(offer)),
+        t["valid_line"].format(dur=fmt_duration(offer.ttl_seconds, offer.lang)),
     ])
 
 
