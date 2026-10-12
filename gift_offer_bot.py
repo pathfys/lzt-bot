@@ -1,29 +1,23 @@
 #!/usr/bin/env python3
 """gift_offer_bot — a plain Telegram BOT (Bot API, token only, no account session).
 
-You type, in a chat the bot can see:
+You type, in a chat the bot can see (or in your own DMs via a Telegram Business
+connection):
 
-    .buy https://t.me/nft/LibertyFigure-181692 stars 1500
+    .buy https://t.me/nft/HappyBrownie-51899 stars 1500 6h
 
-and the bot posts:
+and the bot posts a tidy offer card: the gift link with its preview, who offers
+what, how long the offer lasts, and two buttons — «Принять» / «Отклонить».
 
-    Иван предлагает вам 1 500 звёзд за подарок Liberty Figure #181692
-    [ Принять ]  [ Отклонить ]
-
-with the gift link preview shown above the text. The gift is given by its
-LINK, pasted straight into the command — no account session, just a bot token
-from @BotFather. Inline buttons are a bot-only Telegram feature, which is why
-this is a bot and not a userbot.
-
-Pressing «Принять» rewrites the message into a hand-over note with a button to
-the counterparty's profile; «Отклонить» closes it.
+The offer duration is REQUIRED (3h / 6h / 12h …). When it runs out the card
+closes itself. You cannot accept your own offer.
 
 Run:
     pip install aiogram
     BOT_TOKEN=123:abc python gift_offer_bot.py
 
-Preview the text with no token and no network:
-    python gift_offer_bot.py check '.buy https://t.me/nft/LibertyFigure-181692 stars 1500'
+Preview the card with no token and no network:
+    python gift_offer_bot.py check '.buy https://t.me/nft/HappyBrownie-51899 stars 1500 6h'
 """
 
 from __future__ import annotations
@@ -33,15 +27,17 @@ import logging
 import os
 import re
 import sys
+import time
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from html import escape
 
 log = logging.getLogger("gift_offer_bot")
 
 # ---------------------------------------------------------------------------
-# Command:  .buy  <gift link>  <stars|gram>  <amount>  [en|ru]
-#           .sell <gift link>  <stars|gram>  <amount>  [en|ru]
-# The link, currency and amount may come in any order.
+# Command:  .buy  <gift link>  <stars|gram>  <amount>  <3h|6h|12h>  [en|ru]
+#           .sell <gift link>  <stars|gram>  <amount>  <3h|6h|12h>  [en|ru]
+# Link, currency, amount, duration and language may come in any order.
 # ---------------------------------------------------------------------------
 
 COMMAND_RE = re.compile(r"^[.!/](buy|sell|куплю|продам|покупаю|продаю)\b(.*)$", re.IGNORECASE | re.DOTALL)
@@ -67,80 +63,126 @@ CURRENCY = {
 
 _NUM_RE = re.compile(r"^\d+(?:[.,]\d+)?$")
 
-# Word for the sentence.  stars -> "звёзд" / "Stars",  gram -> "грам" / "TON".
+# Duration: 3h / 6h / 12h / 30m / 1d, Cyrillic units too. Required.
+MIN_TTL, MAX_TTL = 5 * 60, 7 * 24 * 3600
+_DUR_UNITS = {
+    "m": 60, "min": 60, "м": 60, "мин": 60,
+    "h": 3600, "hr": 3600, "ч": 3600, "час": 3600, "часа": 3600, "часов": 3600,
+    "d": 86400, "д": 86400, "дн": 86400, "день": 86400,
+}
+_DUR_RE = re.compile(r"^(\d+)\s*(" + "|".join(sorted(_DUR_UNITS, key=len, reverse=True)) + r")$", re.IGNORECASE)
+
 UNIT_WORD = {
     "ru": {"stars": "звёзд", "gram": "грам"},
     "en": {"stars": "Stars", "gram": "TON"},
 }
+DUR_SUFFIX = {"ru": {"d": "д", "h": "ч", "m": "м"}, "en": {"d": "d", "h": "h", "m": "m"}}
 
 
 TEXT = {
     "ru": {
-        "accept": "Принять", "decline": "Отклонить", "transfer": "Передать НФТ",
-        # (имя) предлагает вам (сумма) (звёзд/грам) за подарок (название #номер)
-        "offer": "<b>{name}</b> предлагает вам <b>{amount} {unit}</b> за подарок {gift}",
-        "accepted": "ОФФЕР ПРИНЯТ",
-        "declined": "ОФФЕР ОТКЛОНЁН",
-        "cancelled": "ОФФЕР ОТМЕНЁН",
+        "accept": "✅ Принять", "decline": "✖️ Отклонить", "transfer": "🎁 Передать NFT",
+        "title": "🎁 Оффер на подарок",
+        "offer_line": "<b>{name}</b> предлагает вам <b>{amount} {unit}</b>",
+        "gift_line": "Подарок: {gift}",
+        "valid_line": "⏳ Действует: {dur}",
+        "accepted": "✅ ОФФЕР ПРИНЯТ",
+        "declined": "✖️ ОФФЕР ОТКЛОНЁН",
+        "cancelled": "✖️ ОФФЕР ОТМЕНЁН",
+        "expired": "⌛ ОФФЕР ИСТЁК",
         "accepted_by": "{who} принял оффер.",
         "hand_over": "Передайте подарок пользователю {who}.",
         "hand_over_how": "Откройте его профиль кнопкой ниже и отправьте NFT через меню подарка.",
         "closed_body": "Оффер больше не активен.",
-        "a_own": "Это твой собственный оффер.",
+        "expired_body": "Время оффера ({dur}) вышло. Оффер больше не активен.",
+        "a_own": "Нельзя принять свой собственный оффер.",
         "a_taken": "Оффер уже закрыт.",
+        "a_expired": "Оффер истёк.",
         "a_author_only": "Отклонить оффер может только автор.",
         "a_gone": "Этого оффера больше нет.",
         "a_ok_accept": "Принято. Смотри сообщение.",
         "a_ok_decline": "Отклонено.",
         "usage": (
-            "Формат: <code>.buy ссылка stars|gram сумма</code>\n"
-            "Пример: <code>.buy https://t.me/nft/LibertyFigure-181692 stars 1500</code>"
+            "Формат: <code>.buy ссылка stars|gram сумма 3h|6h|12h</code>\n"
+            "Пример: <code>.buy https://t.me/nft/HappyBrownie-51899 stars 1500 6h</code>"
         ),
         "bad_link": "Не вижу ссылку на подарок вида <code>t.me/nft/Название-номер</code>.",
         "no_currency": "Не указана валюта — добавь <b>stars</b> или <b>gram</b>.",
         "no_amount": "Не указана сумма.",
+        "no_ttl": "Укажи срок оффера: <b>3h</b>, <b>6h</b> или <b>12h</b>.",
+        "bad_ttl": "Срок <code>{value}</code> вне диапазона — от 5m до 7d.",
     },
     "en": {
-        "accept": "Accept", "decline": "Decline", "transfer": "Transfer NFT",
-        "offer": "<b>{name}</b> offers you <b>{amount} {unit}</b> for the gift {gift}",
-        "accepted": "OFFER ACCEPTED",
-        "declined": "OFFER DECLINED",
-        "cancelled": "OFFER CANCELLED",
+        "accept": "✅ Accept", "decline": "✖️ Decline", "transfer": "🎁 Transfer NFT",
+        "title": "🎁 Gift offer",
+        "offer_line": "<b>{name}</b> offers you <b>{amount} {unit}</b>",
+        "gift_line": "Gift: {gift}",
+        "valid_line": "⏳ Valid for: {dur}",
+        "accepted": "✅ OFFER ACCEPTED",
+        "declined": "✖️ OFFER DECLINED",
+        "cancelled": "✖️ OFFER CANCELLED",
+        "expired": "⌛ OFFER EXPIRED",
         "accepted_by": "{who} accepted the offer.",
         "hand_over": "Hand the gift over to {who}.",
         "hand_over_how": "Open their profile with the button below and send the NFT from the gift menu.",
         "closed_body": "The offer is no longer active.",
-        "a_own": "This is your own offer.",
+        "expired_body": "The {dur} window has run out. The offer is no longer active.",
+        "a_own": "You cannot accept your own offer.",
         "a_taken": "This offer is already closed.",
+        "a_expired": "This offer has expired.",
         "a_author_only": "Only the author can decline this offer.",
         "a_gone": "This offer no longer exists.",
         "a_ok_accept": "Accepted. Check the message.",
         "a_ok_decline": "Declined.",
         "usage": (
-            "Usage: <code>.buy link stars|gram amount</code>\n"
-            "Example: <code>.buy https://t.me/nft/LibertyFigure-181692 stars 1500</code>"
+            "Usage: <code>.buy link stars|gram amount 3h|6h|12h</code>\n"
+            "Example: <code>.buy https://t.me/nft/HappyBrownie-51899 stars 1500 6h</code>"
         ),
         "bad_link": "No gift link of the form <code>t.me/nft/Name-number</code> found.",
         "no_currency": "Which currency? Add <b>stars</b> or <b>gram</b>.",
         "no_amount": "No amount in the command.",
+        "no_ttl": "Set the offer duration: <b>3h</b>, <b>6h</b> or <b>12h</b>.",
+        "bad_ttl": "Duration <code>{value}</code> is out of range — 5m to 7d.",
     },
 }
 
 
 class ParseError(Exception):
-    def __init__(self, code: str):
+    def __init__(self, code: str, value: str = ""):
         super().__init__(code)
         self.code = code
+        self.value = value
+
+
+def parse_duration(token: str) -> int | None:
+    m = _DUR_RE.match(token)
+    if not m:
+        return None
+    return int(m.group(1)) * _DUR_UNITS[m.group(2).lower()]
+
+
+def fmt_duration(seconds: int, lang: str) -> str:
+    sfx = DUR_SUFFIX.get(lang, DUR_SUFFIX["en"])
+    days, rest = divmod(int(seconds), 86400)
+    hours, rest = divmod(rest, 3600)
+    mins = rest // 60
+    parts = [f"{v}{sfx[u]}" for v, u in ((days, "d"), (hours, "h"), (mins, "m")) if v]
+    return " ".join(parts) or f"0{sfx['m']}"
+
+
+def fmt_deadline(expires_at: float) -> str:
+    return datetime.fromtimestamp(expires_at, tz=timezone.utc).strftime("%H:%M UTC")
 
 
 @dataclass
 class Offer:
-    side: str        # "buy" | "sell"
-    slug: str        # "LibertyFigure"
-    number: int      # 181692
-    currency: str    # "stars" | "gram"
-    amount: str      # raw amount as typed, e.g. "1500" / "12.5"
-    lang: str        # "ru" | "en"
+    side: str
+    slug: str
+    number: int
+    currency: str
+    amount: str
+    ttl_seconds: int
+    lang: str
 
     @property
     def url(self) -> str:
@@ -181,24 +223,33 @@ def parse(text: str) -> Offer:
 
     remainder = (rest[: link.start()] + " " + rest[link.end():]).strip()
 
-    currency = None
-    amount = None
+    currency = amount = ttl = None
     lang = "ru"
     for token in remainder.split():
         low = token.lower()
         if low in LANGS:
             lang = LANGS[low]
-        elif low in CURRENCY and currency is None:
+            continue
+        if low in CURRENCY and currency is None:
             currency = CURRENCY[low]
-        elif _NUM_RE.match(token) and amount is None:
+            continue
+        dur = parse_duration(token)
+        if dur is not None and ttl is None:
+            if not MIN_TTL <= dur <= MAX_TTL:
+                raise ParseError("bad_ttl", token)
+            ttl = dur
+            continue
+        if _NUM_RE.match(token) and amount is None:
             amount = token
 
     if currency is None:
         raise ParseError("no_currency")
     if amount is None:
         raise ParseError("no_amount")
+    if ttl is None:
+        raise ParseError("no_ttl")
 
-    return Offer(side=side, slug=slug, number=number, currency=currency, amount=amount, lang=lang)
+    return Offer(side=side, slug=slug, number=number, currency=currency, amount=amount, ttl_seconds=ttl, lang=lang)
 
 
 # ---------------------------------------------------------------------------
@@ -209,23 +260,37 @@ def _gift_ref(offer: Offer) -> str:
     return f'<a href="{escape(offer.url, quote=True)}">{escape(offer.title)}</a>'
 
 
-def render_offer(offer: Offer, *, name: str) -> str:
+def _price(offer: Offer) -> str:
+    return f"{offer.amount_str()} {offer.unit()}"
+
+
+def render_offer(offer: Offer, *, name: str, expires_at: float | None = None) -> str:
     t = TEXT[offer.lang]
-    return t["offer"].format(
-        name=escape(name),
-        amount=offer.amount_str(),
-        unit=offer.unit(),
-        gift=_gift_ref(offer),
-    )
+    dur = fmt_duration(offer.ttl_seconds, offer.lang)
+    if expires_at:
+        dur += f" · {fmt_deadline(expires_at)}"
+    return "\n".join([
+        f"<b>{t['title']}</b>",
+        "",
+        t["offer_line"].format(name=escape(name), amount=offer.amount_str(), unit=offer.unit()),
+        t["gift_line"].format(gift=_gift_ref(offer)),
+        t["valid_line"].format(dur=dur),
+    ])
+
+
+def _closed_head(offer: Offer, state_key: str) -> list[str]:
+    t = TEXT[offer.lang]
+    return [
+        f"<b>{t[state_key]}</b>",
+        "",
+        f"{_gift_ref(offer)} — <b>{_price(offer)}</b>",
+        "",
+    ]
 
 
 def render_accepted(offer: Offer, *, acceptor: str, receiver: str) -> str:
     t = TEXT[offer.lang]
-    return "\n".join([
-        f"<b>{t['accepted']}</b>",
-        "",
-        f"{_gift_ref(offer)} — <b>{offer.amount_str()} {offer.unit()}</b>",
-        "",
+    return "\n".join(_closed_head(offer, "accepted") + [
         t["accepted_by"].format(who=escape(acceptor)),
         "",
         f"<b>{t['hand_over'].format(who=escape(receiver))}</b>",
@@ -235,13 +300,13 @@ def render_accepted(offer: Offer, *, acceptor: str, receiver: str) -> str:
 
 def render_closed(offer: Offer, *, by_author: bool) -> str:
     t = TEXT[offer.lang]
-    state = "cancelled" if by_author else "declined"
-    return "\n".join([
-        f"<b>{t[state]}</b>",
-        "",
-        f"{_gift_ref(offer)} — <b>{offer.amount_str()} {offer.unit()}</b>",
-        "",
-        t["closed_body"],
+    return "\n".join(_closed_head(offer, "cancelled" if by_author else "declined") + [t["closed_body"]])
+
+
+def render_expired(offer: Offer) -> str:
+    t = TEXT[offer.lang]
+    return "\n".join(_closed_head(offer, "expired") + [
+        t["expired_body"].format(dur=fmt_duration(offer.ttl_seconds, offer.lang)),
     ])
 
 
@@ -251,21 +316,24 @@ def render_closed(offer: Offer, *, by_author: bool) -> str:
 
 def check(argv: list[str]) -> int:
     if not argv:
-        print("usage: python gift_offer_bot.py check '.buy https://t.me/nft/LibertyFigure-181692 stars 1500'")
+        print("usage: python gift_offer_bot.py check '.buy https://t.me/nft/HappyBrownie-51899 stars 1500 6h'")
         return 2
     try:
         offer = parse(" ".join(argv))
     except ParseError as exc:
-        print(TEXT["ru"][exc.code])
+        print(TEXT["ru"][exc.code].format(value=exc.value))
         return 1
     t = TEXT[offer.lang]
-    print("---------- message ----------")
-    print(render_offer(offer, name="Иван" if offer.lang == "ru" else "Ivan"))
+    base = 1_760_000_000
+    print("---------- card ----------")
+    print(render_offer(offer, name="Иван" if offer.lang == "ru" else "Ivan", expires_at=base + offer.ttl_seconds))
     print(f"[ {t['accept']} ] [ {t['decline']} ]")
     print("\n---------- after Accept ----------")
     receiver = "@seller" if offer.side == "buy" else "@buyer"
     print(render_accepted(offer, acceptor="@buyer", receiver=receiver))
     print(f"[ {t['transfer']} ]  -> opens {receiver}")
+    print("\n---------- after expiry ----------")
+    print(render_expired(offer))
     print(f"\npreview url: {offer.url}")
     return 0
 
@@ -283,7 +351,8 @@ class OfferState:
     chat_id: int | None = None
     card_message_id: int | None = None
     business_connection_id: str | None = None
-    status: str = "open"            # open | accepted | cancelled
+    expires_at: float = 0.0
+    status: str = "open"            # open | accepted | cancelled | expired
     acceptor_label: str | None = None
 
 
@@ -301,6 +370,9 @@ class Store:
 
     def get(self, offer_id: int) -> OfferState | None:
         return self._by_id.get(offer_id)
+
+    def open_states(self) -> list[tuple[int, OfferState]]:
+        return [(i, s) for i, s in self._by_id.items() if s.status == "open"]
 
 
 def _label(user) -> str:
@@ -329,6 +401,7 @@ def run() -> int:
     )
 
     store = Store()
+    SWEEP_INTERVAL = 20.0
 
     class OfferCB(CallbackData, prefix="of"):
         id: int
@@ -353,19 +426,23 @@ def run() -> int:
     bot = Bot(token, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
     dp = Dispatcher()
 
-    async def post_offer(message: Message, bcid: str | None) -> None:
-        """Turn a .buy/.sell command into the offer card.
+    async def edit_card(state: OfferState, text: str, markup) -> None:
+        await bot.edit_message_text(
+            text,
+            chat_id=state.chat_id,
+            message_id=state.card_message_id,
+            business_connection_id=state.business_connection_id,
+            link_preview_options=preview(state.offer),
+            reply_markup=markup,
+        )
 
-        `bcid` is set when the command was typed in one of the owner's own DMs
-        through a Telegram Business connection; the card is then sent on behalf
-        of the owner into that same DM.
-        """
+    async def post_offer(message: Message, bcid: str | None) -> None:
         try:
             offer = parse(message.text)
         except ParseError as exc:
             try:
                 await bot.send_message(
-                    message.chat.id, TEXT["ru"][exc.code],
+                    message.chat.id, TEXT["ru"][exc.code].format(value=exc.value),
                     business_connection_id=bcid,
                     link_preview_options=LinkPreviewOptions(is_disabled=True),
                 )
@@ -374,6 +451,7 @@ def run() -> int:
             return
 
         author = message.from_user
+        now = time.time()
         state = OfferState(
             offer=offer,
             author_id=author.id,
@@ -381,19 +459,19 @@ def run() -> int:
             author_username=author.username,
             chat_id=message.chat.id,
             business_connection_id=bcid,
+            expires_at=now + offer.ttl_seconds,
         )
         offer_id = store.add(state)
 
         card = await bot.send_message(
             message.chat.id,
-            render_offer(offer, name=author.first_name or _label(author)),
+            render_offer(offer, name=author.first_name or _label(author), expires_at=state.expires_at),
             business_connection_id=bcid,
             link_preview_options=preview(offer),
             reply_markup=offer_keyboard(offer_id, offer.lang),
         )
         state.card_message_id = card.message_id
 
-        # Tidy the command away if we are allowed to.
         try:
             if bcid:
                 await bot.delete_business_messages(bcid, [message.message_id])
@@ -408,7 +486,6 @@ def run() -> int:
 
     @dp.business_message(F.text.regexp(COMMAND_RE.pattern))
     async def on_business_command(message: Message) -> None:
-        # Fires for commands typed in the owner's DMs via a business connection.
         await post_offer(message, message.business_connection_id)
 
     @dp.callback_query(OfferCB.filter())
@@ -419,20 +496,18 @@ def run() -> int:
             return
         offer, t = state.offer, TEXT[state.offer.lang]
         presser = query.from_user
-        bcid = state.business_connection_id
-
-        async def rewrite(text: str, markup) -> None:
-            await bot.edit_message_text(
-                text,
-                chat_id=state.chat_id,
-                message_id=state.card_message_id,
-                business_connection_id=bcid,
-                link_preview_options=preview(offer),
-                reply_markup=markup,
-            )
 
         if state.status != "open":
             await query.answer(t["a_taken"], show_alert=True)
+            return
+
+        if time.time() >= state.expires_at:
+            state.status = "expired"
+            try:
+                await edit_card(state, render_expired(offer), None)
+            except Exception as exc:
+                log.warning("could not close expired offer: %s", exc)
+            await query.answer(t["a_expired"], show_alert=True)
             return
 
         if callback_data.action == "a":
@@ -442,7 +517,6 @@ def run() -> int:
             state.status = "accepted"
             state.acceptor_label = _label(presser)
 
-            # On a buy the author receives the gift; on a sell the acceptor does.
             if offer.side == "buy":
                 receiver_id, receiver_label, receiver_name = (
                     state.author_id, state.author_label, state.author_username,
@@ -452,27 +526,40 @@ def run() -> int:
                     presser.id, state.acceptor_label, presser.username,
                 )
 
-            await rewrite(
+            await edit_card(
+                state,
                 render_accepted(offer, acceptor=state.acceptor_label, receiver=receiver_label),
                 transfer_keyboard(offer.lang, receiver_id, receiver_name),
             )
             await query.answer(t["a_ok_accept"])
             return
 
-        by_author = presser.id == state.author_id
-        if not by_author:
+        if presser.id != state.author_id:
             await query.answer(t["a_author_only"], show_alert=True)
             return
         state.status = "cancelled"
-        await rewrite(render_closed(offer, by_author=True), None)
+        await edit_card(state, render_closed(offer, by_author=True), None)
         await query.answer(t["a_ok_decline"])
+
+    async def sweeper() -> None:
+        while True:
+            now = time.time()
+            for _id, state in store.open_states():
+                if now >= state.expires_at:
+                    state.status = "expired"
+                    try:
+                        await edit_card(state, render_expired(state.offer), None)
+                    except Exception as exc:
+                        log.warning("could not expire offer %s: %s", _id, exc)
+            await asyncio.sleep(SWEEP_INTERVAL)
 
     async def main() -> None:
         me = await bot.get_me()
         log.info(
             "bot @%s is live — groups/DM-with-bot and Telegram Business DMs. "
-            "Type .buy <link> <stars|gram> <amount>", me.username,
+            "Type .buy <link> <stars|gram> <amount> <3h|6h|12h>", me.username,
         )
+        asyncio.create_task(sweeper())
         await dp.start_polling(bot)
 
     asyncio.run(main())
