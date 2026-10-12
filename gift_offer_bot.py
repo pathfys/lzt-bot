@@ -3,25 +3,27 @@
 
 You type, in a chat the bot can see:
 
-    .buy https://t.me/nft/LibertyFigure-181692 1500 stars
+    .buy https://t.me/nft/LibertyFigure-181692 stars 1500
 
-and the bot posts an offer card: the gift link with its preview, the price,
-and two buttons under it — «Принять» / «Отклонить» (or Accept / Decline).
+and the bot posts:
 
-The gift is given by its LINK, pasted straight into the command — no name
-lookup, no account session. This is "automation" the simple way: a bot with a
-token from @BotFather. Inline buttons are a bot-only Telegram feature, which is
-exactly why this is a bot and not a userbot.
+    Иван предлагает вам 1 500 звёзд за подарок Liberty Figure #181692
+    [ Принять ]  [ Отклонить ]
 
-Pressing «Принять» rewrites the card into a hand-over instruction with a button
-that opens the counterparty's profile; «Отклонить» closes it.
+with the gift link preview shown above the text. The gift is given by its
+LINK, pasted straight into the command — no account session, just a bot token
+from @BotFather. Inline buttons are a bot-only Telegram feature, which is why
+this is a bot and not a userbot.
+
+Pressing «Принять» rewrites the message into a hand-over note with a button to
+the counterparty's profile; «Отклонить» closes it.
 
 Run:
     pip install aiogram
     BOT_TOKEN=123:abc python gift_offer_bot.py
 
-Try the rendering with no token and no network:
-    python gift_offer_bot.py check '.buy https://t.me/nft/LibertyFigure-181692 1500 stars ru'
+Preview the text with no token and no network:
+    python gift_offer_bot.py check '.buy https://t.me/nft/LibertyFigure-181692 stars 1500'
 """
 
 from __future__ import annotations
@@ -37,14 +39,9 @@ from html import escape
 log = logging.getLogger("gift_offer_bot")
 
 # ---------------------------------------------------------------------------
-# Command grammar
-#
-#   .buy  <gift link> <price...> [en|ru]
-#   .sell <gift link> <price...> [en|ru]
-#
-# The gift is a t.me/nft/<Slug>-<number> link pasted into the command. The
-# price is whatever you type after it (a number plus an optional unit word);
-# the last bare en/ru token, if any, picks the language.
+# Command:  .buy  <gift link>  <stars|gram>  <amount>  [en|ru]
+#           .sell <gift link>  <stars|gram>  <amount>  [en|ru]
+# The link, currency and amount may come in any order.
 # ---------------------------------------------------------------------------
 
 COMMAND_RE = re.compile(r"^[.!/](buy|sell|куплю|продам|покупаю|продаю)\b(.*)$", re.IGNORECASE | re.DOTALL)
@@ -54,36 +51,34 @@ SIDE = {
     "sell": "sell", "продам": "sell", "продаю": "sell",
 }
 
-# t.me/nft/<Slug>-<number>, however it was pasted (with https://, @, tg:// …).
 NFT_LINK_RE = re.compile(
     r"(?:https?://)?(?:t\.me|telegram\.me|telegram\.dog)/nft/([A-Za-z0-9]+)-(\d+)",
     re.IGNORECASE,
 )
 
-LANGS = {
-    "en": "en", "eng": "en", "english": "en",
-    "ru": "ru", "rus": "ru", "russian": "ru", "рус": "ru",
+LANGS = {"en": "en", "eng": "en", "english": "en", "ru": "ru", "rus": "ru", "russian": "ru", "рус": "ru"}
+
+CURRENCY = {
+    "stars": "stars", "star": "stars", "⭐": "stars", "⭐️": "stars",
+    "звезд": "stars", "звёзд": "stars", "звезды": "stars", "звёзды": "stars",
+    "gram": "gram", "grams": "gram", "ton": "gram", "toncoin": "gram",
+    "💎": "gram", "тон": "gram", "грам": "gram",
 }
 
-# Optional currency unit, only to prettify the price line.
-CURRENCY_WORD = {
-    "stars": "Stars", "star": "Stars", "⭐": "Stars", "⭐️": "Stars",
-    "звезд": "Stars", "звёзд": "Stars", "звезды": "Stars", "звёзды": "Stars",
-    "ton": "TON", "toncoin": "TON", "gram": "TON", "💎": "TON", "тон": "TON",
+_NUM_RE = re.compile(r"^\d+(?:[.,]\d+)?$")
+
+# Word for the sentence.  stars -> "звёзд" / "Stars",  gram -> "грам" / "TON".
+UNIT_WORD = {
+    "ru": {"stars": "звёзд", "gram": "грам"},
+    "en": {"stars": "Stars", "gram": "TON"},
 }
 
-_PRICE_RE = re.compile(r"^(\d+(?:[.,]\d+)?)\s*(.*)$", re.DOTALL)
-
-
-# ---------------------------------------------------------------------------
-# Texts (ru default — the buttons the owner asked for are Принять / Отклонить)
-# ---------------------------------------------------------------------------
 
 TEXT = {
     "ru": {
-        "buy": "ПОКУПАЮ", "sell": "ПРОДАЮ",
-        "price": "Цена:",
         "accept": "Принять", "decline": "Отклонить", "transfer": "Передать НФТ",
+        # (имя) предлагает вам (сумма) (звёзд/грам) за подарок (название #номер)
+        "offer": "<b>{name}</b> предлагает вам <b>{amount} {unit}</b> за подарок {gift}",
         "accepted": "ОФФЕР ПРИНЯТ",
         "declined": "ОФФЕР ОТКЛОНЁН",
         "cancelled": "ОФФЕР ОТМЕНЁН",
@@ -98,16 +93,16 @@ TEXT = {
         "a_ok_accept": "Принято. Смотри сообщение.",
         "a_ok_decline": "Отклонено.",
         "usage": (
-            "Формат: <code>.buy ссылка цена [en|ru]</code>\n"
-            "Пример: <code>.buy https://t.me/nft/LibertyFigure-181692 1500 stars</code>"
+            "Формат: <code>.buy ссылка stars|gram сумма</code>\n"
+            "Пример: <code>.buy https://t.me/nft/LibertyFigure-181692 stars 1500</code>"
         ),
         "bad_link": "Не вижу ссылку на подарок вида <code>t.me/nft/Название-номер</code>.",
-        "no_price": "Не указана цена.",
+        "no_currency": "Не указана валюта — добавь <b>stars</b> или <b>gram</b>.",
+        "no_amount": "Не указана сумма.",
     },
     "en": {
-        "buy": "BUYING", "sell": "SELLING",
-        "price": "Price:",
         "accept": "Accept", "decline": "Decline", "transfer": "Transfer NFT",
+        "offer": "<b>{name}</b> offers you <b>{amount} {unit}</b> for the gift {gift}",
         "accepted": "OFFER ACCEPTED",
         "declined": "OFFER DECLINED",
         "cancelled": "OFFER CANCELLED",
@@ -122,11 +117,12 @@ TEXT = {
         "a_ok_accept": "Accepted. Check the message.",
         "a_ok_decline": "Declined.",
         "usage": (
-            "Usage: <code>.buy link price [en|ru]</code>\n"
-            "Example: <code>.buy https://t.me/nft/LibertyFigure-181692 1500 stars</code>"
+            "Usage: <code>.buy link stars|gram amount</code>\n"
+            "Example: <code>.buy https://t.me/nft/LibertyFigure-181692 stars 1500</code>"
         ),
         "bad_link": "No gift link of the form <code>t.me/nft/Name-number</code> found.",
-        "no_price": "No price in the command.",
+        "no_currency": "Which currency? Add <b>stars</b> or <b>gram</b>.",
+        "no_amount": "No amount in the command.",
     },
 }
 
@@ -139,11 +135,12 @@ class ParseError(Exception):
 
 @dataclass
 class Offer:
-    side: str            # "buy" | "sell"
-    slug: str            # "LibertyFigure"
-    number: int          # 181692
-    price: str           # rendered price line, HTML-safe, e.g. "1,500 Stars"
-    lang: str            # "ru" | "en"
+    side: str        # "buy" | "sell"
+    slug: str        # "LibertyFigure"
+    number: int      # 181692
+    currency: str    # "stars" | "gram"
+    amount: str      # raw amount as typed, e.g. "1500" / "12.5"
+    lang: str        # "ru" | "en"
 
     @property
     def url(self) -> str:
@@ -154,31 +151,18 @@ class Offer:
         spaced = re.sub(r"(?<=[a-z0-9])(?=[A-Z])", " ", self.slug)
         return f"{spaced} #{self.number}"
 
+    def amount_str(self) -> str:
+        whole, _, frac = self.amount.replace(",", ".").partition(".")
+        sep = " " if self.lang == "ru" else ","
+        grouped = ""
+        for i, ch in enumerate(reversed(whole)):
+            if i and i % 3 == 0:
+                grouped = sep + grouped
+            grouped = ch + grouped
+        return grouped + (((","if self.lang == "ru" else ".") + frac) if frac else "")
 
-def _fmt_price(raw: str, lang: str) -> str:
-    """Prettify '1500 stars' -> '1,500 Stars' / '1 500 Stars'. Falls back to
-    the text as typed, so the owner can write anything."""
-    raw = raw.strip()
-    match = _PRICE_RE.match(raw)
-    if not match:
-        return escape(raw)
-    number, tail = match.group(1), match.group(2).strip()
-
-    whole, _, frac = number.replace(",", ".").partition(".")
-    sep = " " if lang == "ru" else ","
-    grouped = ""
-    for i, ch in enumerate(reversed(whole)):
-        if i and i % 3 == 0:
-            grouped = sep + grouped
-        grouped = ch + grouped
-    shown = grouped + ((("," if lang == "ru" else ".") + frac) if frac else "")
-
-    unit = CURRENCY_WORD.get(tail.lower())
-    if unit:
-        return f"{shown} {unit}"
-    if tail:
-        return f"{shown} {escape(tail)}"
-    return shown
+    def unit(self) -> str:
+        return UNIT_WORD[self.lang][self.currency]
 
 
 def parse(text: str) -> Offer:
@@ -195,45 +179,44 @@ def parse(text: str) -> Offer:
         raise ParseError("bad_link")
     slug, number = link.group(1), int(link.group(2))
 
-    # Everything except the link is price text; a trailing en/ru token is the
-    # language, not the price.
     remainder = (rest[: link.start()] + " " + rest[link.end():]).strip()
-    tokens = remainder.split()
 
+    currency = None
+    amount = None
     lang = "ru"
-    if tokens and tokens[-1].lower() in LANGS:
-        lang = LANGS[tokens.pop().lower()]
-    elif tokens and tokens[0].lower() in LANGS:
-        lang = LANGS[tokens.pop(0).lower()]
+    for token in remainder.split():
+        low = token.lower()
+        if low in LANGS:
+            lang = LANGS[low]
+        elif low in CURRENCY and currency is None:
+            currency = CURRENCY[low]
+        elif _NUM_RE.match(token) and amount is None:
+            amount = token
 
-    price_raw = " ".join(tokens).strip()
-    if not price_raw:
-        raise ParseError("no_price")
+    if currency is None:
+        raise ParseError("no_currency")
+    if amount is None:
+        raise ParseError("no_amount")
 
-    return Offer(
-        side=side,
-        slug=slug,
-        number=number,
-        price=_fmt_price(price_raw, lang),
-        lang=lang,
-    )
+    return Offer(side=side, slug=slug, number=number, currency=currency, amount=amount, lang=lang)
 
 
 # ---------------------------------------------------------------------------
-# Rendering (pure; returns HTML strings)
+# Rendering (pure HTML)
 # ---------------------------------------------------------------------------
 
 def _gift_ref(offer: Offer) -> str:
     return f'<a href="{escape(offer.url, quote=True)}">{escape(offer.title)}</a>'
 
 
-def render_offer(offer: Offer) -> str:
+def render_offer(offer: Offer, *, name: str) -> str:
     t = TEXT[offer.lang]
-    return "\n".join([
-        f"<b>{t[offer.side]}</b> · {_gift_ref(offer)}",
-        "",
-        f"{t['price']} <b>{offer.price}</b>",
-    ])
+    return t["offer"].format(
+        name=escape(name),
+        amount=offer.amount_str(),
+        unit=offer.unit(),
+        gift=_gift_ref(offer),
+    )
 
 
 def render_accepted(offer: Offer, *, acceptor: str, receiver: str) -> str:
@@ -241,7 +224,7 @@ def render_accepted(offer: Offer, *, acceptor: str, receiver: str) -> str:
     return "\n".join([
         f"<b>{t['accepted']}</b>",
         "",
-        f"{_gift_ref(offer)} — <b>{offer.price}</b>",
+        f"{_gift_ref(offer)} — <b>{offer.amount_str()} {offer.unit()}</b>",
         "",
         t["accepted_by"].format(who=escape(acceptor)),
         "",
@@ -256,7 +239,7 @@ def render_closed(offer: Offer, *, by_author: bool) -> str:
     return "\n".join([
         f"<b>{t[state]}</b>",
         "",
-        f"{_gift_ref(offer)} — <b>{offer.price}</b>",
+        f"{_gift_ref(offer)} — <b>{offer.amount_str()} {offer.unit()}</b>",
         "",
         t["closed_body"],
     ])
@@ -268,7 +251,7 @@ def render_closed(offer: Offer, *, by_author: bool) -> str:
 
 def check(argv: list[str]) -> int:
     if not argv:
-        print("usage: python gift_offer_bot.py check '.buy https://t.me/nft/LibertyFigure-181692 1500 stars'")
+        print("usage: python gift_offer_bot.py check '.buy https://t.me/nft/LibertyFigure-181692 stars 1500'")
         return 2
     try:
         offer = parse(" ".join(argv))
@@ -276,11 +259,11 @@ def check(argv: list[str]) -> int:
         print(TEXT["ru"][exc.code])
         return 1
     t = TEXT[offer.lang]
-    print("---------- card ----------")
-    print(render_offer(offer))
+    print("---------- message ----------")
+    print(render_offer(offer, name="Иван" if offer.lang == "ru" else "Ivan"))
     print(f"[ {t['accept']} ] [ {t['decline']} ]")
     print("\n---------- after Accept ----------")
-    receiver = "@you" if offer.side == "buy" else "@buyer"
+    receiver = "@seller" if offer.side == "buy" else "@buyer"
     print(render_accepted(offer, acceptor="@buyer", receiver=receiver))
     print(f"[ {t['transfer']} ]  -> opens {receiver}")
     print(f"\npreview url: {offer.url}")
@@ -296,7 +279,8 @@ class OfferState:
     offer: Offer
     author_id: int
     author_label: str
-    status: str = "open"            # open | accepted | declined | cancelled
+    author_username: str | None = None
+    status: str = "open"            # open | accepted | cancelled
     acceptor_label: str | None = None
 
 
@@ -355,14 +339,12 @@ def run() -> int:
         ]])
 
     def transfer_keyboard(lang: str, user_id: int, username: str | None) -> InlineKeyboardMarkup:
-        t = TEXT[lang]
         url = f"https://t.me/{username}" if username else f"tg://user?id={user_id}"
         return InlineKeyboardMarkup(inline_keyboard=[[
-            InlineKeyboardButton(text=t["transfer"], url=url),
+            InlineKeyboardButton(text=TEXT[lang]["transfer"], url=url),
         ]])
 
     def preview(offer: Offer) -> LinkPreviewOptions:
-        # Pin the preview to the gift link, large, above the text.
         return LinkPreviewOptions(url=offer.url, prefer_large_media=True, show_above_text=True)
 
     bot = Bot(token, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
@@ -373,22 +355,24 @@ def run() -> int:
         try:
             offer = parse(message.text)
         except ParseError as exc:
-            lang = "ru"
-            await message.reply(TEXT[lang][exc.code], link_preview_options=LinkPreviewOptions(is_disabled=True))
+            await message.reply(TEXT["ru"][exc.code], link_preview_options=LinkPreviewOptions(is_disabled=True))
             return
 
         author = message.from_user
-        state = OfferState(offer=offer, author_id=author.id, author_label=_label(author))
-        offer_id = store.add(state)
+        offer_id = store.add(OfferState(
+            offer=offer,
+            author_id=author.id,
+            author_label=_label(author),
+            author_username=author.username,
+        ))
 
         await message.answer(
-            render_offer(offer),
+            render_offer(offer, name=author.first_name or _label(author)),
             link_preview_options=preview(offer),
             reply_markup=offer_keyboard(offer_id, offer.lang),
         )
-        # Tidy the command away if the bot is allowed to (admin in a group).
         try:
-            await message.delete()
+            await message.delete()  # tidy the command away if allowed (admin in a group)
         except Exception:
             pass
 
@@ -414,13 +398,13 @@ def run() -> int:
 
             # On a buy the author receives the gift; on a sell the acceptor does.
             if offer.side == "buy":
-                receiver_id, receiver_label, receiver_name = (
-                    state.author_id, state.author_label, state.author_label.lstrip("@") if state.author_label.startswith("@") else None,
-                )
+                receiver_id = state.author_id
+                receiver_label = state.author_label
+                receiver_name = state.author_username
             else:
-                receiver_id, receiver_label, receiver_name = (
-                    presser.id, state.acceptor_label, presser.username,
-                )
+                receiver_id = presser.id
+                receiver_label = state.acceptor_label
+                receiver_name = presser.username
 
             await query.message.edit_text(
                 render_accepted(offer, acceptor=state.acceptor_label, receiver=receiver_label),
@@ -430,7 +414,6 @@ def run() -> int:
             await query.answer(t["a_ok_accept"])
             return
 
-        # decline
         by_author = presser.id == state.author_id
         if not by_author:
             await query.answer(t["a_author_only"], show_alert=True)
@@ -445,7 +428,7 @@ def run() -> int:
 
     async def main() -> None:
         me = await bot.get_me()
-        log.info("bot @%s is live — type .buy <link> <price> where it can read messages", me.username)
+        log.info("bot @%s is live — type .buy <link> <stars|gram> <amount>", me.username)
         await dp.start_polling(bot)
 
     asyncio.run(main())
